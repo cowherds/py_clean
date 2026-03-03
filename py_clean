@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""
+脚本功能：删除 .py 文件中的所有注释以及无效空格，输出到新文件，不修改原文件。
+
+使用方式：
+  python3 py_clean.py <input.py> [output.py]
+  python3 py_clean.py <input.py>                    # 默认输出到 clean 文件夹
+  python3 py_clean.py -d <目录路径>                  # 批量处理目录下所有 .py 文件
+  python3 py_clean.py -d <目录路径> -r               # 递归处理目录及子目录下所有 .py 文件
+
+移除内容：
+  - # 单行注释
+  - 三引号文档字符串（docstring）
+  - 行尾空白
+  - 所有空行
+  - 同行内多个连续空格（合并为单个空格）
+"""
+
+import argparse
+import tokenize
+import io
+from pathlib import Path
+
+
+def remove_comments_and_whitespace(source_code: str) -> str:
+    """
+    移除 Python 源代码中的注释和无效空格。
+    基于 tokenize 重建源码，跳过 COMMENT 和 docstring 类型的 token。
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source_code).readline))
+    except tokenize.TokenError:
+        return source_code
+
+    result = []
+    last_end_line, last_end_col = 1, 0
+
+    for tok in tokens:
+        if tok.type == tokenize.COMMENT:
+            last_end_line, last_end_col = tok.end
+            continue
+        if tok.type == tokenize.STRING and _is_docstring(tok, tokens):
+            last_end_line, last_end_col = tok.end
+            continue
+
+        srow, scol = tok.start
+        erow, ecol = tok.end
+
+        if srow > last_end_line:
+            result.append("\n" * (srow - last_end_line))
+            if scol > 0:
+                result.append(" " * scol)
+        elif srow == last_end_line and scol > last_end_col:
+            result.append(" ")
+
+        result.append(tok.string)
+        last_end_line, last_end_col = erow, ecol
+
+    cleaned = "".join(result)
+
+    processed_lines = [line.rstrip() for line in cleaned.split("\n") if line.strip()]
+
+    return "\n".join(processed_lines) + ("\n" if processed_lines else "")
+
+
+def _is_docstring(tok, tokens):
+    """判断字符串是否为文档字符串（仅三引号字符串，排除普通字符串字面量）"""
+    if not (tok.string.startswith('"""') or tok.string.startswith("'''")):
+        return False
+    token_list = list(tokens)
+    try:
+        idx = token_list.index(tok)
+    except ValueError:
+        return False
+    if idx == 0:
+        return True
+    prev = token_list[idx - 1]
+    if prev.type in (tokenize.NEWLINE, tokenize.NL):
+        return True
+    if prev.type == tokenize.INDENT:
+        return True
+    return False
+
+
+def process_file(input_path: str, output_path: str) -> None:
+    """处理单个文件，读取输入，清理后写入输出文件。"""
+    input_file = Path(input_path)
+    output_file = Path(output_path)
+
+    if not input_file.exists():
+        raise FileNotFoundError(f"输入文件不存在: {input_path}")
+
+    if input_file.suffix != ".py":
+        print(f"警告: 输入文件 {input_path} 不是 .py 文件")
+
+    content = input_file.read_text(encoding="utf-8")
+    cleaned = remove_comments_and_whitespace(content)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(cleaned, encoding="utf-8")
+    print(f"已处理: {input_path}")
+    print(f"输出到: {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="删除 .py 文件中的注释和无效空格，输出到新文件，不修改原文件。"
+    )
+    parser.add_argument("input", nargs="?", help="输入的 .py 文件路径或目录路径（配合 -d 使用）")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="输出的 .py 文件路径（默认输出到 clean 文件夹，仅在单文件模式下有效）",
+    )
+    parser.add_argument(
+        "-d", "--dir",
+        action="store_true",
+        help="批量模式：处理指定目录下的所有 .py 文件",
+    )
+    parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="递归处理子目录（仅与 -d 配合使用）",
+    )
+
+    args = parser.parse_args()
+
+    if args.dir:
+        if not args.input:
+            parser.error("使用 -d 时必须指定目录路径")
+        dir_path = Path(args.input)
+        if not dir_path.is_dir():
+            parser.error(f"路径不是目录: {args.input}")
+        pattern = "**/*.py" if args.recursive else "*.py"
+        py_files = sorted(dir_path.glob(pattern))
+        if not py_files:
+            print(f"未在 {args.input} 中找到 .py 文件")
+            return
+        clean_dir = Path("clean")
+        clean_dir.mkdir(parents=True, exist_ok=True)
+        for i, f in enumerate(py_files, 1):
+            if f.is_file():
+                try:
+                    output_path = clean_dir / f.name
+                    process_file(str(f), str(output_path))
+                except Exception as e:
+                    print(f"跳过 {f}: {e}")
+        print(f"\n共处理 {len(py_files)} 个文件")
+    else:
+        if not args.input:
+            parser.error("请指定输入的 .py 文件路径")
+        if args.output is None:
+            input_path = Path(args.input)
+            args.output = str(Path("clean") / input_path.name)
+        try:
+            process_file(args.input, args.output)
+        except Exception as e:
+            print(f"错误: {e}")
+            raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
